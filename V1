@@ -3,46 +3,43 @@
 -- ===================================================================
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage") -- [LÓGICA ONLINE] Precisamos acessar os RemoteEvents
 local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
 
 local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
-local CHEST_NAME = "DiamondChest" -- Nome do baú de diamante baseado em pesquisas sobre o jogo
+local character
+local humanoidRootPart
 
-local scriptEnabled = false -- Controla se o script está ativo ou não
-local isTeleporting = false -- Evita que o script tente teleportar para vários baús ao mesmo tempo
+-- !! IMPORTANTE !! O nome do baú continua sendo necessário
+local CHEST_NAME = "DiamondChest" 
+-- !! MUDANÇA CRÍTICA !! Você PRECISA encontrar o nome do RemoteEvent que o jogo usa para coletar itens.
+-- Este é um palpite. O nome real provavelmente é diferente.
+local REMOTE_EVENT_NAME = "CollectChestEvent" -- Exemplo: pode ser "Claim", "Interact", "ChestRequest", etc.
+
+local scriptEnabled = false
+local isBusy = false -- Renomeado de "isTeleporting" para refletir a nova lógica
 
 -- ===================================================================
--- CRIAÇÃO DA GUI (INTERFACE GRÁFICA)
+-- GUI (Sem alterações)
 -- ===================================================================
-local screenGui = Instance.new("ScreenGui")
-screenGui.Parent = player:WaitForChild("PlayerGui")
+local screenGui = Instance.new("ScreenGui", player:WaitForChild("PlayerGui"))
 screenGui.ResetOnSpawn = false
-
-local mainFrame = Instance.new("Frame")
+local mainFrame = Instance.new("Frame", screenGui)
 mainFrame.Size = UDim2.new(0, 200, 0, 50)
 mainFrame.Position = UDim2.new(0.5, -100, 0, 10)
 mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 mainFrame.BorderSizePixel = 0
-mainFrame.Parent = screenGui
-
-local toggleButton = Instance.new("TextButton")
+local toggleButton = Instance.new("TextButton", mainFrame)
 toggleButton.Size = UDim2.new(1, 0, 1, 0)
-toggleButton.Parent = mainFrame
 toggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
 toggleButton.Text = "Auto-Farm: OFF"
 toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
 toggleButton.Font = Enum.Font.SourceSansBold
 toggleButton.TextSize = 18
-
--- Função para ligar/desligar o script
 toggleButton.MouseButton1Click:Connect(function()
-    scriptEnabled = not scriptEnabled -- Inverte o valor (true vira false, false vira true)
-    isTeleporting = false -- Reseta o estado de teleporte
-
+    scriptEnabled = not scriptEnabled
+    isBusy = false
     if scriptEnabled then
         toggleButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
         toggleButton.Text = "Auto-Farm: ON"
@@ -55,24 +52,24 @@ toggleButton.MouseButton1Click:Connect(function()
 end)
 
 -- ===================================================================
--- FUNÇÕES PRINCIPAIS
+-- FUNÇÕES PRINCIPAIS (ADAPTADAS PARA ONLINE)
 -- ===================================================================
 
--- Função para encontrar o baú mais próximo
+-- Esta função continua igual, pois o cliente pode ler o Workspace
 function findNearestChest()
     local nearestChest = nil
     local minDistance = math.huge
-
-    for i, v in pairs(Workspace:GetDescendants()) do
-        -- Verifica se o objeto tem o nome correto e é uma Part ou Model
+    if not humanoidRootPart then return nil end
+    for _, v in ipairs(Workspace:GetDescendants()) do
         if v.Name == CHEST_NAME and (v:IsA("BasePart") or v:IsA("Model")) then
             local partPosition
-            if v:IsA("Model") then
-                partPosition = v:GetPrimaryPartCFrame().Position
-            else
+            if v:IsA("Model") and v.PrimaryPart then
+                partPosition = v.PrimaryPart.Position
+            elseif v:IsA("BasePart") then
                 partPosition = v.Position
+            else
+                continue
             end
-            
             local distance = (humanoidRootPart.Position - partPosition).Magnitude
             if distance < minDistance then
                 minDistance = distance
@@ -83,105 +80,60 @@ function findNearestChest()
     return nearestChest
 end
 
--- Função para coletar o baú
-function collectChest(chest)
-    print("Tentando coletar o baú:", chest.Name)
-    
-    -- MÉTODO 1: ProximityPrompt (se aparece 'E' para coletar)
-    local prompt = chest:FindFirstChildOfClass("ProximityPrompt", true) -- Busca recursivamente
-    if prompt then
-        fireproximityprompt(prompt)
-        print("ProximityPrompt acionado.")
-    end
+-- [MUDANÇA CRÍTICA] A função de coleta agora dispara um RemoteEvent
+function collectChestRemotely(chest)
+    -- Encontra o RemoteEvent dentro do ReplicatedStorage
+    local remoteEvent = ReplicatedStorage:FindFirstChild(REMOTE_EVENT_NAME, true) -- O 'true' busca em todos os descendentes
 
-    -- Se não funcionar, experimente os outros métodos comentados
-    -- MÉTODO 2: ClickDetector
-    -- local clickDetector = chest:FindFirstChildOfClass("ClickDetector", true)
-    -- if clickDetector then
-    --     fireclickdetector(clickDetector)
-    --     print("ClickDetector acionado.")
-    -- end
-
-    -- MÉTODO 3: Toque (o teleporte deve bastar)
-
-    wait(0.5) -- Pequena espera para garantir que a coleta foi registrada
-end
-
--- Função para obter lista de servidores
-function getServers()
-    local cursor = ""
-    local servers = {}
-    repeat
-        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
-        if cursor then url = url .. "&cursor=" .. cursor end
-        local success, response = pcall(function()
-            return HttpService:JSONDecode(HttpService:GetAsync(url))
-        end)
-        if success then
-            for _, server in ipairs(response.data) do
-                if server.playing < server.maxPlayers and server.id ~= game.JobId then
-                    table.insert(servers, server.id)
-                end
-            end
-            cursor = response.nextPageCursor
-        else
-            print("Erro ao obter servidores:", response)
-        end
-    until not cursor
-    return servers
-end
-
--- Função para mudar de servidor
-function serverHop()
-    print("Tentando mudar de servidor...")
-    
-    local servers = getServers()
-    if #servers > 0 then
-        local randomJobId = servers[math.random(1, #servers)]
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, randomJobId, player)
+    if remoteEvent then
+        print("RemoteEvent '" .. REMOTE_EVENT_NAME .. "' encontrado! Disparando para o servidor...")
+        -- Dispara o evento, enviando o baú como argumento.
+        -- O servidor vai receber este "pedido" de coleta.
+        remoteEvent:FireServer(chest)
     else
-        print("Nenhum outro servidor encontrado. Reiniciando personagem...")
-        player:LoadCharacter()
+        print("ERRO: Não foi possível encontrar o RemoteEvent chamado '" .. REMOTE_EVENT_NAME .. "'. A coleta falhará.")
     end
+end
+
+-- [LÓGICA ONLINE] Esta função agora funciona como esperado em servidores públicos
+function serverHop()
+    print("Coleta solicitada. Mudando de servidor...")
+    pcall(function()
+        -- Simplesmente se teleporta para o mesmo jogo, o Roblox te colocará em um servidor diferente
+        TeleportService:Teleport(game.PlaceId)
+    end)
 end
 
 -- ===================================================================
 -- LOOP PRINCIPAL
 -- ===================================================================
-while wait(1) do
-    if scriptEnabled and not isTeleporting then
-        character = player.Character -- Garante que temos o personagem mais recente
-        humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
+while true do
+    task.wait(1)
+    
+    character = player.Character
+    humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
 
-        if humanoidRootPart then
-            local chest = findNearestChest()
+    if scriptEnabled and not isBusy and humanoidRootPart then
+        local chest = findNearestChest()
+        
+        if chest then
+            isBusy = true -- Impede o script de rodar de novo
             
-            if chest then
-                isTeleporting = true
-                print("Baú de diamante encontrado! Teleportando...")
+            print("Baú encontrado:", chest.Name)
+            
+            -- [MUDANÇA CRÍTICA] Em vez de teleportar, nós pedimos a coleta remotamente
+            collectChestRemotely(chest)
+            
+            -- Espera um pouco para o pedido ser processado antes de pular de servidor
+            wait(1) 
+            
+            serverHop()
 
-                -- Teleporta o jogador para cima do baú
-                local targetCFrame
-                if chest:IsA("Model") and chest.PrimaryPart then
-                    targetCFrame = chest.PrimaryPart.CFrame
-                else
-                    targetCFrame = chest.CFrame
-                end
-                humanoidRootPart.CFrame = targetCFrame * CFrame.new(0, 5, 0)
-                wait(0.2)
-
-                -- Coleta o baú
-                collectChest(chest)
-                
-                -- Muda de servidor
-                serverHop()
-
-                -- Espera um pouco e reseta a flag se o teleporte falhar
-                wait(5)
-                isTeleporting = false
-            else
-                print("Nenhum baú de diamante encontrado no momento.")
-            end
+            -- Se o teleporte falhar, o script vai destravar após 5 segundos
+            wait(5)
+            isBusy = false
+        else
+            print("Procurando por baús de diamante...")
         end
     end
 end
