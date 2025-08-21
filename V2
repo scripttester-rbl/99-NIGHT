@@ -1,187 +1,153 @@
 -- ===================================================================
+-- ESTRUTURA ANTI-ERRO E INICIALIZAÇÃO
+-- ===================================================================
+print("Iniciando Auto-Farm Script v3 (Robusto)...")
+
+-- [ESTRUTURA ANTI-ERRO] Espera pacientemente pelo jogador local, a causa mais comum de falhas na inicialização.
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+if not player then
+    print("DIAGNÓSTICO: Jogador local não encontrado imediatamente, aguardando...")
+    player = Players.PlayerAdded:Wait()
+end
+print("DIAGNÓSTICO: Jogador local encontrado: " .. player.Name)
+
+-- Espera pela interface do jogador estar pronta
+local playerGui = player:WaitForChild("PlayerGui")
+print("DIAGNÓSTICO: PlayerGui encontrado.")
+
+-- ===================================================================
 -- SERVIÇOS E VARIÁVEIS GLOBAIS
 -- ===================================================================
-local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
 
-local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local character
+local humanoidRootPart
 
-local CHEST_NAME = "DiamondChest" -- Nome do baú de diamante baseado em pesquisas sobre o jogo
+-- !! VERIFIQUE ESTES NOMES !!
+local CHEST_NAME = "DiamondChest" 
+local REMOTE_EVENT_NAME = "CollectChestEvent"
 
-local scriptEnabled = false -- Controla se o script está ativo ou não
-local isTeleporting = false -- Evita que o script tente teleportar para vários baús ao mesmo tempo
+local scriptEnabled = false
+local isBusy = false
 
--- ===================================================================
--- CRIAÇÃO DA GUI (INTERFACE GRÁFICA)
--- ===================================================================
-local screenGui = Instance.new("ScreenGui")
-screenGui.Parent = player:WaitForChild("PlayerGui")
-screenGui.ResetOnSpawn = false
-
-local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.new(0, 200, 0, 50)
-mainFrame.Position = UDim2.new(0.5, -100, 0, 10)
-mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-mainFrame.BorderSizePixel = 0
-mainFrame.Parent = screenGui
-
-local toggleButton = Instance.new("TextButton")
-toggleButton.Size = UDim2.new(1, 0, 1, 0)
-toggleButton.Parent = mainFrame
-toggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-toggleButton.Text = "Auto-Farm: OFF"
-toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-toggleButton.Font = Enum.Font.SourceSansBold
-toggleButton.TextSize = 18
-
--- Função para ligar/desligar o script
-toggleButton.MouseButton1Click:Connect(function()
-    scriptEnabled = not scriptEnabled -- Inverte o valor (true vira false, false vira true)
-    isTeleporting = false -- Reseta o estado de teleporte
-
-    if scriptEnabled then
-        toggleButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
-        toggleButton.Text = "Auto-Farm: ON"
-        print("Script ativado!")
-    else
-        toggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-        toggleButton.Text = "Auto-Farm: OFF"
-        print("Script desativado.")
-    end
-end)
+-- Variáveis de timeout
+local SEARCH_TIMEOUT_SECONDS = 20
+local searchTimeoutCounter = 0
 
 -- ===================================================================
--- FUNÇÕES PRINCIPAIS
+-- FUNÇÃO PRINCIPAL QUE RODA APÓS A INICIALIZAÇÃO SEGURA
 -- ===================================================================
-
--- Função para encontrar o baú mais próximo
-function findNearestChest()
-    local nearestChest = nil
-    local minDistance = math.huge
-
-    for i, v in pairs(Workspace:GetDescendants()) do
-        -- Verifica se o objeto tem o nome correto e é uma Part ou Model
-        if v.Name == CHEST_NAME and (v:IsA("BasePart") or v:IsA("Model")) then
-            local partPosition
-            if v:IsA("Model") then
-                partPosition = v:GetPrimaryPartCFrame().Position
-            else
-                partPosition = v.Position
-            end
-            
-            local distance = (humanoidRootPart.Position - partPosition).Magnitude
-            if distance < minDistance then
-                minDistance = distance
-                nearestChest = v
-            end
-        end
-    end
-    return nearestChest
-end
-
--- Função para coletar o baú
-function collectChest(chest)
-    print("Tentando coletar o baú:", chest.Name)
+local function Main()
+    -- ===================================================================
+    -- CRIAÇÃO DA GUI
+    -- ===================================================================
+    local screenGui = Instance.new("ScreenGui", playerGui)
+    screenGui.ResetOnSpawn = false
+    local mainFrame = Instance.new("Frame", screenGui)
+    mainFrame.Size = UDim2.new(0, 200, 0, 50); mainFrame.Position = UDim2.new(0.5, -100, 0, 10)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30); mainFrame.BorderSizePixel = 0
+    local toggleButton = Instance.new("TextButton", mainFrame)
+    toggleButton.Size = UDim2.new(1, 0, 1, 0); toggleButton.Text = "Auto-Farm: OFF"
+    toggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0); toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleButton.Font = Enum.Font.SourceSansBold; toggleButton.TextSize = 18
+    print("DIAGNÓSTICO: Interface GUI criada com sucesso.")
     
-    -- MÉTODO 1: ProximityPrompt (se aparece 'E' para coletar)
-    local prompt = chest:FindFirstChildOfClass("ProximityPrompt", true) -- Busca recursivamente
-    if prompt then
-        fireproximityprompt(prompt)
-        print("ProximityPrompt acionado.")
-    end
-
-    -- Se não funcionar, experimente os outros métodos comentados
-    -- MÉTODO 2: ClickDetector
-    -- local clickDetector = chest:FindFirstChildOfClass("ClickDetector", true)
-    -- if clickDetector then
-    --     fireclickdetector(clickDetector)
-    --     print("ClickDetector acionado.")
-    -- end
-
-    -- MÉTODO 3: Toque (o teleporte deve bastar)
-
-    wait(0.5) -- Pequena espera para garantir que a coleta foi registrada
-end
-
--- Função para obter lista de servidores
-function getServers()
-    local cursor = ""
-    local servers = {}
-    repeat
-        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
-        if cursor then url = url .. "&cursor=" .. cursor end
-        local success, response = pcall(function()
-            return HttpService:JSONDecode(HttpService:GetAsync(url))
-        end)
-        if success then
-            for _, server in ipairs(response.data) do
-                if server.playing < server.maxPlayers and server.id ~= game.JobId then
-                    table.insert(servers, server.id)
-                end
-            end
-            cursor = response.nextPageCursor
+    toggleButton.MouseButton1Click:Connect(function()
+        scriptEnabled = not scriptEnabled
+        isBusy = false
+        searchTimeoutCounter = 0
+        if scriptEnabled then
+            toggleButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0); toggleButton.Text = "Auto-Farm: ON"
+            print("--> SCRIPT ATIVADO PELA GUI <--");
         else
-            print("Erro ao obter servidores:", response)
+            toggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0); toggleButton.Text = "Auto-Farm: OFF"
+            print("--> SCRIPT DESATIVADO PELA GUI <--");
         end
-    until not cursor
-    return servers
-end
+    end)
 
--- Função para mudar de servidor
-function serverHop()
-    print("Tentando mudar de servidor...")
-    
-    local servers = getServers()
-    if #servers > 0 then
-        local randomJobId = servers[math.random(1, #servers)]
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, randomJobId, player)
-    else
-        print("Nenhum outro servidor encontrado. Reiniciando personagem...")
-        player:LoadCharacter()
-    end
-end
-
--- ===================================================================
--- LOOP PRINCIPAL
--- ===================================================================
-while wait(1) do
-    if scriptEnabled and not isTeleporting then
-        character = player.Character -- Garante que temos o personagem mais recente
-        humanoidRootPart = character and character:FindFirstChild("HumanoidRootPart")
-
-        if humanoidRootPart then
-            local chest = findNearestChest()
-            
-            if chest then
-                isTeleporting = true
-                print("Baú de diamante encontrado! Teleportando...")
-
-                -- Teleporta o jogador para cima do baú
-                local targetCFrame
-                if chest:IsA("Model") and chest.PrimaryPart then
-                    targetCFrame = chest.PrimaryPart.CFrame
-                else
-                    targetCFrame = chest.CFrame
+    -- ===================================================================
+    -- FUNÇÕES DE LÓGICA
+    -- ===================================================================
+    local function findNearestChest()
+        local nearestChest = nil
+        local minDistance = math.huge
+        if not humanoidRootPart then return nil end
+        for _, v in ipairs(Workspace:GetDescendants()) do
+            if v.Name == CHEST_NAME then
+                local partPosition = v:IsA("Model") and v.PrimaryPart and v.PrimaryPart.Position or v:IsA("BasePart") and v.Position
+                if partPosition then
+                    local distance = (humanoidRootPart.Position - partPosition).Magnitude
+                    if distance < minDistance then
+                        minDistance = distance; nearestChest = v
+                    end
                 end
-                humanoidRootPart.CFrame = targetCFrame * CFrame.new(0, 5, 0)
-                wait(0.2)
+            end
+        end
+        return nearestChest
+    end
 
-                -- Coleta o baú
-                collectChest(chest)
-                
-                -- Muda de servidor
+    local function collectChestRemotely(chest)
+        local remoteEvent = ReplicatedStorage:FindFirstChild(REMOTE_EVENT_NAME, true)
+        if remoteEvent then
+            print("DIAGNÓSTICO: RemoteEvent '" .. REMOTE_EVENT_NAME .. "' encontrado! Disparando para o servidor...")
+            remoteEvent:FireServer(chest)
+        else
+            print("!!! ERRO CRÍTICO: Não foi possível encontrar o RemoteEvent '" .. REMOTE_EVENT_NAME .. "'. A coleta falhará.")
+            isBusy = false
+        end
+    end
+
+    local function serverHop()
+        print("DIAGNÓSTICO: Solicitando mudança de servidor...")
+        isBusy = true
+        pcall(TeleportService.Teleport, TeleportService, game.PlaceId)
+        task.wait(5)
+        isBusy = false
+    end
+
+    -- ===================================================================
+    -- LOOP PRINCIPAL
+    -- ===================================================================
+    while true do
+        task.wait(1)
+
+        character = player.Character or player.CharacterAdded:Wait()
+        humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+
+        if not scriptEnabled or isBusy or not humanoidRootPart then
+            continue
+        end
+        
+        local chest = findNearestChest()
+        
+        if chest then
+            isBusy = true
+            searchTimeoutCounter = 0
+            print("BAÚ ENCONTRADO! Nome: " .. chest.Name)
+            
+            collectChestRemotely(chest)
+            task.wait(1) 
+            serverHop()
+            
+            task.wait(5)
+            isBusy = false
+        else
+            searchTimeoutCounter = searchTimeoutCounter + 1
+            print("DIAGNÓSTICO: Nenhum baú encontrado. Contador de timeout: " .. searchTimeoutCounter .. "/" .. SEARCH_TIMEOUT_SECONDS)
+            
+            if searchTimeoutCounter >= SEARCH_TIMEOUT_SECONDS then
+                print("!!! TIMEOUT ATINGIDO ("..SEARCH_TIMEOUT_SECONDS.."s)! Forçando troca de servidor. !!!")
+                searchTimeoutCounter = 0
                 serverHop()
-
-                -- Espera um pouco e reseta a flag se o teleporte falhar
-                wait(5)
-                isTeleporting = false
-            else
-                print("Nenhum baú de diamante encontrado no momento.")
             end
         end
     end
 end
+
+-- ===================================================================
+-- EXECUTA A FUNÇÃO PRINCIPAL
+-- ===================================================================
+Main()
